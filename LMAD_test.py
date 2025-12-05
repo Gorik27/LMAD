@@ -11,107 +11,35 @@ import os
 from pathlib import Path
 import shutil
 
+
 def numerical_sort_key(filename):
     # Extract numerical parts from the filename for sorting
     parts = re.findall(r'\d+|\D+', filename)
     return [int(part) if part.isdigit() else part for part in parts]
 
-def select_nn(
-    project,
-    target,
-    structure,
-    outname_selection,
-    outname_xyz,
-    cutoff):
-    """
-    Find elements
-    """
-    elements = {}
-    num_types = 0
-    cnt = 0
-    structure = f'{project}/{structure}'
-    outname_selection = f'{project}/{outname_selection}'
-    outname_xyz = f'{project}/{outname_xyz}'
 
-    with open(structure) as f:
-        for line in f.readlines():
-            match = re.search(r'\s*(\d+)\s+atom types\s*', line)
-            if match:
-                num_types = int(match.group(1))
-            if num_types:
-                if cnt<num_types:
-                    match = re.search(r'\s*(\d+)\s+\d+\.\d*\s+#\s+(.+)\s*', line)
-                    if match:
-                        tokens = match.groups()[::-1]
-                        elements.update({tokens[0]: int(tokens[1])})
-                        cnt += 1
-                elif cnt==num_types:
-                    break
+n_cpu = 8
+project = 's3_210_1ni'
+#rnd_seed = 3
+N_steps = 10
 
-    print('find elements:', elements)
+lmad_steps = 500
+chech_steps = 100
+chech_each = int(lmad_steps//chech_steps)
+dump_steps = 10
 
-    """
-    Find hopping atom
-    """
-    atoms = read(structure, format='lammps-data')
-    pts = atoms.positions
-    ids = atoms.arrays['id']
-    L = np.diag(atoms.cell)
-    mask = (atoms.arrays['type']==elements[target])
-    id0 = ids[mask][0]
-    r0 = pts[mask][0]
+cutoff = 0.3 #A
+clean_space = 1#True
+heat_coef = 5
+elements = "Ag Ni"
 
-    """
-    Find neighbors
-    """
-    #@njit(cache=True)
-    def dist_to(rs, pos, L):
-        ds = np.zeros(len(rs))
-        dr = np.abs(rs-pos)
-        for xi in range(3):
-            x = dr[:, xi]
-            mask = (x>L[xi]*0.5)
-            x[mask] = L[xi]-x[mask]
-        return np.sum(dr**2, axis=1)**0.5
+lmp = f'mpiexec --np {n_cpu} lmp_ompi'
 
-    ds = dist_to(pts, r0, L)
-
-    lm_mask = (ds<cutoff)
-    lm_ids = ids[lm_mask]
-    print('Neighboring atoms:', len(lm_ids))
-
-    out = 'group lm_atoms id '+' '.join(map(str, lm_ids))
-    with open(outname_selection, 'w') as f:
-        f.write(out)
-
-    pipeline = import_file(structure)
-    data = pipeline.compute()
-    data.particles_.create_property('Selection', data=lm_mask)
-    pipeline_out = Pipeline(source = StaticSource(data=data))
-    export_file(pipeline_out, outname_xyz, "xyz", columns=['Position', 'Particle Type', 'Particle Identifier', 'Selection']) 
-    
-    return id0, lm_ids 
-
-
-def LMAD(
-    lmp,
-    project,
-    rnd_seed, 
-    heat_coef,
-    lmad_steps,
-    chech_steps,
-    dump_steps,
-    cutoff,
-    elements,
-    clean_space,
-    n_cpu,
-    id0):
-
-    chech_each = int(lmad_steps//chech_steps)
-    print(f'random seed: {rnd_seed}')
+for rnd_seed in range(1, N_steps+1):
     """
     STEP 1: LOCAL MELTING
     """
+    print(f'Step {rnd_seed}')
     routine = 'in.lmad'
     task = (f'{lmp} -in  {routine} \
     -var rnd_seed {rnd_seed} \
@@ -142,6 +70,11 @@ def LMAD(
     STEP 2: SEARCH FOR TRANSITIONS
     2A: MINIMIZATION
     """
+    #files = sorted(glob(f'{project}/{dumpfile}'), key=numerical_sort_key)
+    #structures = files[::chech_each]
+    #print(structures)
+
+    #s_name = structure.replace('dump.', '')
     task = f'atomsk --unfold {project}/{dumpfile} lmp -overwrite'
     with Popen(task.split(), stdout=PIPE, stdin=PIPE, bufsize=1, universal_newlines=True) as p:
         for line in p.stdout:
@@ -156,6 +89,7 @@ def LMAD(
     datfiles = []
     for id, structure in enumerate(structures):
         #print(1+id, '/', len(structures))
+        
         structure = structure.replace(project+'/', '')
         task = (f'{lmp} -in  {routine} -var project {project} -var structure {structure} -var rnd_seed {str(int(rnd_seed))} -var id {id} -var elements {elements}')
         with Popen(task.split(), stdout=PIPE, bufsize=1, universal_newlines=True) as p:
@@ -187,17 +121,6 @@ def LMAD(
     L = np.diag(atoms.cell)
     rs = [get_rs(datfile) for datfile in datfiles[1:]]
 
-    """     
-    def dist(r0, rs, L):
-        dr = np.zeros_like(rs)
-        for i in range(3):
-            dr[:, i] = np.abs(rs[:, i]-r0[i])
-            mask = (dr[:, i]>L[i]*0.5)
-            dr[mask, i] = L[i]-dr[mask, i]
-        ds = np.sqrt(np.sum(dr**2, axis=1))
-        return ds 
-    """
-
     def dist(r1, r2, L):
         dr = np.zeros_like(r1)
         for i in range(3):
@@ -228,7 +151,7 @@ def LMAD(
         transition_inds = []
         print('There is no transitions')
         if clean_space:
-            #remove quick_minimization files
+            #remove qm files
             try:
                 path = f'{project}/qm/{str(int(rnd_seed))}'
                 shutil.rmtree(path)
@@ -242,49 +165,6 @@ def LMAD(
                 print(f"Error removing: {path} : {e.strerror}")
 
 
-if __name__=="__main__":
-    project = 's3_210_1ni'
-    target = 'Ni'
-    structure = 'relaxed.dat'
-    outname_xyz = 'selection.xyz'
-    outname_selection = 'lm_atoms.txt'
-    lm_cutoff = 4
 
-    id0, lm_ids = select_nn(
-        project,
-        target,
-        structure,
-        outname_selection,
-        outname_xyz,
-        lm_cutoff
-    )
 
-    n_cpu = 8
-    N_steps = 10
 
-    lmad_steps = 500
-    chech_steps = 100
-    dump_steps = 10
-
-    distance_cutoff = 0.3 #A
-    clean_space = 1#True
-    heat_coef = 5
-    elements = "Ag Ni"
-    lmp = f'mpiexec --np {n_cpu} lmp_ompi'
-
-    for rnd_seed in range(1, N_steps+1):
-        print(f'STEP: {rnd_seed}/{N_steps}')
-        LMAD(
-            lmp,
-            project,
-            rnd_seed, 
-            heat_coef,
-            lmad_steps,
-            chech_steps,
-            dump_steps,
-            distance_cutoff,
-            elements,
-            clean_space,
-            n_cpu,
-            id0
-        )
