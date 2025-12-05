@@ -1,0 +1,43 @@
+units           metal
+boundary        p p p 
+atom_style      atomic
+
+variable dt equal 0.001
+
+neighbor        2.0 bin 
+neigh_modify    every 10 delay 0 check no
+
+variable project index cell_Ni
+variable structure index supercell.lmp
+variable elements index "Ag Ni"
+variable elements_str string ""
+label loop_elem
+  variable elements_str string "${elements_str}${elements} "
+  next elements
+  jump SELF loop_elem
+
+shell cd ${project}
+read_data ${structure}
+
+pair_style  nep 
+pair_coeff * * /home/user/Projects/Potentials/nep89.txt ${elements_str}
+
+timestep ${dt}
+
+include params.txt
+
+#compute 1 all pe/atom
+shell mkdir dumps_relax
+dump 1 all cfg 1000 dumps_relax/dump_*.cfg mass type xs ys zs
+dump_modify 1 element ${elements_str}
+thermo_style custom time temp pe press 
+thermo  100
+
+velocity all create 100 1234 dist gaussian
+fix 1 all npt temp 100 ${T} $(100*v_dt) iso 0.0 0.0 $(1000*v_dt) 
+run 10000
+unfix 1
+fix 2 all npt temp ${T} ${T} $(100*v_dt) iso 0.0 0.0 $(1000*v_dt) 
+run 1000
+
+write_data relaxed.dat nocoeff

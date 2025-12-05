@@ -1,0 +1,42 @@
+
+units           metal
+boundary        p p p 
+atom_style      atomic
+
+neighbor        2.0 bin 
+
+
+variable project index cell
+variable structure index relaxed.dat
+variable id index 0
+variable rnd_seed index 0
+variable thermo_step index 10
+variable elements index "N Ag"
+variable elements_str string ""
+label loop_elem
+  variable elements_str string "${elements_str}${elements} "
+  next elements
+  jump SELF loop_elem
+
+shell cd ${project}
+shell mkdir logs
+shell mkdir logs/${rnd_seed}
+log logs/${rnd_seed}/log.qm_${id}
+
+read_data ${structure}
+
+pair_style  nep 
+pair_coeff * * /home/user/Projects/Potentials/nep89.txt ${elements_str}
+
+thermo_style custom time pe press 
+thermo  10
+
+fix 1 all recenter INIT INIT INIT
+
+min_style cg
+minimize 1e-10 1e-2 1000 10000
+shell mkdir qm
+shell mkdir qm/${rnd_seed}
+write_data qm/${rnd_seed}/${id}.dat nocoeff
+print "datfile: qm/${rnd_seed}/${id}.dat"
+print "All done!"

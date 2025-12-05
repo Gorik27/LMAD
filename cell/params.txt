@@ -1,0 +1,2 @@
+variable T equal 500
+variable T_melt equal 1200
