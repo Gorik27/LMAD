@@ -10,6 +10,7 @@ from ase.io import read
 import os
 from pathlib import Path
 import shutil
+import argparse
 
 def numerical_sort_key(filename):
     # Extract numerical parts from the filename for sorting
@@ -105,7 +106,8 @@ def LMAD(
     elements,
     clean_space,
     n_cpu,
-    id0):
+    transition_all,
+    id0=None):
 
     chech_each = int(lmad_steps//chech_steps)
     print(f'random seed: {rnd_seed}')
@@ -187,18 +189,15 @@ def LMAD(
     L = np.diag(atoms.cell)
     rs = [get_rs(datfile) for datfile in datfiles[1:]]
 
-    """     
-    def dist(r0, rs, L):
-        dr = np.zeros_like(rs)
-        for i in range(3):
-            dr[:, i] = np.abs(rs[:, i]-r0[i])
-            mask = (dr[:, i]>L[i]*0.5)
-            dr[mask, i] = L[i]-dr[mask, i]
-        ds = np.sqrt(np.sum(dr**2, axis=1))
-        return ds 
-    """
 
-    def dist(r1, r2, L):
+    def dist_point(r0, r, L):
+        dr = np.abs(r-r0)
+        mask = (dr>L*0.5)
+        dr[mask] = L[mask]-dr[mask]
+        ds = np.sqrt(np.sum(dr**2))
+        return ds 
+
+    def dist_arrays(r1, r2, L):
         dr = np.zeros_like(r1)
         for i in range(3):
             dr[:, i] = np.abs(r1[:, i]-r2[:, i])
@@ -210,7 +209,10 @@ def LMAD(
     transition_inds = [0]
     transition_flag = False
     for i in range(len(rs)):
-        ds = dist(r0, rs[i], L)
+        if transition_all:
+            ds = dist_arrays(r0, rs[i], L)
+        else:
+            ds = dist_point(r0[id0], rs[i][id0], L)
         if np.any(ds>cutoff):
             transition_inds.append(i+1)
             transition_flag = True
@@ -243,12 +245,48 @@ def LMAD(
 
 
 if __name__=="__main__":
-    project = 's3_210_1ni'
-    target = 'Ni'
-    structure = 'relaxed.dat'
-    outname_xyz = 'selection.xyz'
-    outname_selection = 'lm_atoms.txt'
-    lm_cutoff = 4
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-n", "--name", required=True, 
+                        help='name of folder with project')
+    parser.add_argument("-s", "--structure", default='relaxed.dat', 
+                        help='name of file with prepared structure')
+    parser.add_argument("-t", "--target", required=True, 
+                        help='target specie [e.g. Ni]; assumed that structure has a single atom of target type which diffusion will be explored')
+    parser.add_argument("-o", "--outname_selection", default='lm_atoms.txt', 
+                        help='name of file to write lammps group with selected atoms')
+    parser.add_argument("-oxyz", "--outname_xyz", default='selection.xyz', 
+                        help='name of file to write dump with selected atoms (in exyz format)')
+    parser.add_argument("-lm", "--lm_cutoff", type=float, required=True, 
+                        help='atoms with this cutoff [Angstroms] from the target will be heated')
+    parser.add_argument("-np", "--np", type=int, default=1)
+    parser.add_argument("--lmp", default='lmp_ompi', 
+                        help='lammps executable')
+    parser.add_argument("-N", '--N_steps', type=int, default=100,
+                        help='number of LMAD steps')
+    parser.add_argument('--lmad_steps', type=int, default=500,
+                        help='number of MD annealing steps in LMAD run')
+    parser.add_argument('--check_steps', type=int, default=100,
+                        help='steps interval for checking for transition')
+    parser.add_argument('--dump_steps', type=int, default=10,
+                        help='steps interval for dumping')
+    parser.add_argument('--transition_all', action='store_true', default=False,
+                        help='transition event triggered by any atom (True) or only by target atom (False)')
+    parser.add_argument("-c", '--distance_cutoff', type=float, default=0.3,
+                        help='distance cutoff above which transition is detected [Angstroms]')
+    parser.add_argument('--not_clean_space', action='store_false', default=True,
+                        help='turn off removing dumps if transition did not occur')
+    parser.add_argument("-hc", '--heat_coef', type=float, default=5.0,
+                        help='heating coefficient (temperature = melting_temperature*melting_coef)')
+    parser.add_argument('-e', '--elements', type=str, nargs='+', required=True,
+                        help='chemical elements separated by spaces (to put in lammps potential setup)')
+    args = parser.parse_args()
+    
+    project = args.name #'s3_210_1ni'
+    target = args.target #'Ni'
+    structure = args.structure #'relaxed.dat'
+    outname_xyz = args.outname_xyz #'selection.xyz'
+    outname_selection = args.outname_selection #'lm_atoms.txt'
+    lm_cutoff = args.lm_cutoff #4
 
     id0, lm_ids = select_nn(
         project,
@@ -259,20 +297,29 @@ if __name__=="__main__":
         lm_cutoff
     )
 
-    n_cpu = 8
-    N_steps = 10
+    n_cpu = args.np #8S
+    lmp_bin = args.lmp #'lmp_ompi'
+    if n_cpu > 1:
+        lmp = f'mpiexec --np {n_cpu} {lmp_bin}'
+    elif n_cpu == 1:
+        lmp = lmp_bin
+    else:
+        raise ValueError(f'number of cpus must be positive integer, not {n_cpu}!!!')
 
-    lmad_steps = 500
-    chech_steps = 100
-    dump_steps = 10
+    N_steps = args.N_steps #100
 
-    distance_cutoff = 0.3 #A
-    clean_space = 1#True
-    heat_coef = 5
-    elements = "Ag Ni"
-    lmp = f'mpiexec --np {n_cpu} lmp_ompi'
+    lmad_steps = args.lmad_steps #500
+    check_steps = args.check_steps #100
+    dump_steps = args.dump_steps #10
+    transition_all = args.transition_all #False # True - transition event triggered by any atom, False - only by target atom (id0)
 
-    for rnd_seed in range(1, N_steps+1):
+    distance_cutoff = args.distance_cutoff #0.3 #A
+    clean_space = (not args.not_clean_space) #1#True
+    heat_coef = args.heat_coef #5
+    elements = ' '.join(args.elements) #"Ag Ni"
+
+    rng_list = range(1, N_steps+1)
+    for rnd_seed in rng_list:
         print(f'STEP: {rnd_seed}/{N_steps}')
         LMAD(
             lmp,
@@ -280,11 +327,12 @@ if __name__=="__main__":
             rnd_seed, 
             heat_coef,
             lmad_steps,
-            chech_steps,
+            check_steps,
             dump_steps,
             distance_cutoff,
             elements,
             clean_space,
             n_cpu,
+            transition_all,
             id0
         )

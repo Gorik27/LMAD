@@ -35,7 +35,8 @@ elements = "Ag Ni"
 
 lmp = f'mpiexec --np {n_cpu} lmp_ompi'
 
-for rnd_seed in range(1, N_steps+1):
+rng_list = range(1, N_steps+1)
+for rnd_seed in rng_list:
     """
     STEP 1: LOCAL MELTING
     """
@@ -121,19 +122,29 @@ for rnd_seed in range(1, N_steps+1):
     L = np.diag(atoms.cell)
     rs = [get_rs(datfile) for datfile in datfiles[1:]]
 
-    def dist(r1, r2, L):
+    """     def dist(r1, r2, L):
         dr = np.zeros_like(r1)
         for i in range(3):
             dr[:, i] = np.abs(r1[:, i]-r2[:, i])
             mask = (dr[:, i]>L[i]*0.5)
             dr[mask, i] = L[i]-dr[mask, i]
         ds = np.sqrt(np.sum(dr**2, axis=1))
-        return ds
+        return ds """
+
+    def dist(r0, r, L):
+        dr = np.zeros(3)
+        for i in range(3):
+            dr[i] = np.abs(r[i]-r0[i])
+            if (dr[i]>L[i]*0.5):
+                dr[i] = L[i]-dr[i]
+        ds = np.sqrt(np.sum(dr**2))
+        return ds 
 
     transition_inds = [0]
     transition_flag = False
     for i in range(len(rs)):
-        ds = dist(r0, rs[i], L)
+        #ds = dist(r0, rs[i], L)
+        ds = dist(r0[id0], rs[i][id0], L)
         if np.any(ds>cutoff):
             transition_inds.append(i+1)
             transition_flag = True
