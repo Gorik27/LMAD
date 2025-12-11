@@ -95,6 +95,79 @@ def select_nn(
     
     return id0, r0, lm_ids 
 
+def check_transition(
+    project,
+    datfiles,
+    id0,
+    cutoff,
+    transition_all,
+    rnd_seed,
+    clean_space):
+    def get_rs_id(file):
+        atoms = read(f'{project}/{file}', format='lammps-data')
+        return atoms.positions, atoms.arrays['id']
+
+    atoms = read(f'{project}/{datfiles[0]}', format='lammps-data')
+    r0 = atoms.positions
+    ids0 = atoms.arrays['id']
+    L = np.diag(atoms.cell)
+    rs_ids = [get_rs_id(datfile) for datfile in datfiles[1:]]
+
+
+    def dist_point(r0, r, L):
+        dr = np.abs(r-r0)
+        mask = (dr>L*0.5)
+        dr[mask] = L[mask]-dr[mask]
+        ds = np.sqrt(np.sum(dr**2))
+        return ds 
+
+    def dist_arrays(r1, r2, L):
+        dr = np.zeros_like(r1)
+        for i in range(3):
+            dr[:, i] = np.abs(r1[:, i]-r2[:, i])
+            mask = (dr[:, i]>L[i]*0.5)
+            dr[mask, i] = L[i]-dr[mask, i]
+        ds = np.sqrt(np.sum(dr**2, axis=1))
+        return ds
+
+    transition_inds = [0]
+    transition_flag = False
+    for i in range(len(rs_ids)):
+        if transition_all:
+            ds = dist_arrays(r0, rs_ids[i][0], L)
+        else:
+            rs, ids = rs_ids[i]
+            ind0 = np.where(ids==id0)[0][0]
+            ds = dist_point(r0[ind0], rs[ind0], L)
+        if np.any(ds>cutoff):
+            transition_inds.append(i+1)
+            transition_flag = True
+            r0 = rs_ids[i][0]
+
+    if transition_flag:
+        print(f'Find transitions: {transition_inds}')
+        neb_path = Path(f'{project}/neb/{str(int(rnd_seed))}')
+        neb_path.mkdir(parents=True, exist_ok=True)
+        for i, ind in enumerate(transition_inds):
+            src = f'{project}/{datfiles[ind]}'
+            dst = neb_path/f'{i}.dat'
+            shutil.copy(src, dst)
+    else:
+        transition_inds = []
+        print('There is no transitions')
+        if clean_space:
+            #remove quick_minimization files
+            try:
+                path = f'{project}/qm/{str(int(rnd_seed))}'
+                shutil.rmtree(path)
+            except OSError as e:
+                print(f"Error removing: {path} : {e.strerror}")
+            #remove dump files
+            try:
+                path = f'{project}/dumps/lmad_{str(int(rnd_seed))}'
+                shutil.rmtree(path)
+            except OSError as e:
+                print(f"Error removing: {path} : {e.strerror}")
 
 def LMAD(
     lmp,
