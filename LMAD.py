@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 import shutil
 import argparse
+from numba import njit
+
 
 def numerical_sort_key(filename):
     # Extract numerical parts from the filename for sorting
@@ -65,7 +67,7 @@ def select_nn(
     """
     Find neighbors
     """
-    #@njit(cache=True)
+    @njit(cache=True)
     def dist_to(rs, pos, L):
         ds = np.zeros(len(rs))
         dr = np.abs(rs-pos)
@@ -91,7 +93,7 @@ def select_nn(
     pipeline_out = Pipeline(source = StaticSource(data=data))
     export_file(pipeline_out, outname_xyz, "xyz", columns=['Position', 'Particle Type', 'Particle Identifier', 'Selection']) 
     
-    return id0, lm_ids 
+    return id0, r0, lm_ids 
 
 
 def LMAD(
@@ -103,9 +105,11 @@ def LMAD(
     chech_steps,
     dump_steps,
     cutoff,
+    active_radius,
     elements,
     clean_space,
     n_cpu,
+    r0, 
     transition_all,
     id0=None):
 
@@ -118,10 +122,15 @@ def LMAD(
     task = (f'{lmp} -in  {routine} \
     -var rnd_seed {rnd_seed} \
     -var project {project} \
+    -var lmad_steps {lmad_steps} \
+    -var thermo_steps {dump_steps} \
     -var heat_coef {heat_coef} \
     -var elements {elements} \
     -var thermo_steps {dump_steps} \
-    -var lmad_steps {lmad_steps}')
+    -var x0 {r0[0]} \
+    -var y0 {r0[1]} \
+    -var z0 {r0[2]} \
+    -var active_radius {active_radius}')
 
     finished = False
     dumpfile = ''
@@ -144,7 +153,7 @@ def LMAD(
     STEP 2: SEARCH FOR TRANSITIONS
     2A: MINIMIZATION
     """
-    task = f'atomsk --unfold {project}/{dumpfile} lmp -overwrite'
+    task = f'atomsk --unfold {project}/{dumpfile} -remove-atoms 0 lmp -overwrite'
     with Popen(task.split(), stdout=PIPE, stdin=PIPE, bufsize=1, universal_newlines=True) as p:
         for line in p.stdout:
             if 'ERROR' in line:
@@ -159,7 +168,15 @@ def LMAD(
     for id, structure in enumerate(structures):
         #print(1+id, '/', len(structures))
         structure = structure.replace(project+'/', '')
-        task = (f'{lmp} -in  {routine} -var project {project} -var structure {structure} -var rnd_seed {str(int(rnd_seed))} -var id {id} -var elements {elements}')
+        task = (f'{lmp} -in  {routine} -var project {project} \
+        -var structure {structure} \
+        -var rnd_seed {str(int(rnd_seed))} \
+        -var id {id} \
+        -var elements {elements} \
+        -var x0 {r0[0]} \
+        -var y0 {r0[1]} \
+        -var z0 {r0[2]} \
+        -var active_radius {active_radius}')
         with Popen(task.split(), stdout=PIPE, bufsize=1, universal_newlines=True) as p:
             time.sleep(0.1)
             #print('\n')
@@ -252,10 +269,6 @@ if __name__=="__main__":
                         help='name of file with prepared structure')
     parser.add_argument("-t", "--target", required=True, 
                         help='target specie [e.g. Ni]; assumed that structure has a single atom of target type which diffusion will be explored')
-    parser.add_argument("-o", "--outname_selection", default='lm_atoms.txt', 
-                        help='name of file to write lammps group with selected atoms')
-    parser.add_argument("-oxyz", "--outname_xyz", default='selection.xyz', 
-                        help='name of file to write dump with selected atoms (in exyz format)')
     parser.add_argument("-lm", "--lm_cutoff", type=float, required=True, 
                         help='atoms with this cutoff [Angstroms] from the target will be heated')
     parser.add_argument("-np", "--np", type=int, default=1)
@@ -267,12 +280,14 @@ if __name__=="__main__":
                         help='number of MD annealing steps in LMAD run')
     parser.add_argument('--check_steps', type=int, default=100,
                         help='steps interval for checking for transition')
-    parser.add_argument('--dump_steps', type=int, default=10,
+    parser.add_argument('--dump_steps', type=int, default=100,
                         help='steps interval for dumping')
     parser.add_argument('--transition_all', action='store_true', default=False,
                         help='transition event triggered by any atom (True) or only by target atom (False)')
     parser.add_argument("-c", '--distance_cutoff', type=float, default=0.3,
                         help='distance cutoff above which transition is detected [Angstroms]')
+    parser.add_argument("-r", '--active_radius', type=float, default=20,
+                        help='radius of sphere for MD simulation [Angstroms]')
     parser.add_argument('--not_clean_space', action='store_false', default=True,
                         help='turn off removing dumps if transition did not occur')
     parser.add_argument("-hc", '--heat_coef', type=float, default=5.0,
@@ -284,11 +299,11 @@ if __name__=="__main__":
     project = args.name #'s3_210_1ni'
     target = args.target #'Ni'
     structure = args.structure #'relaxed.dat'
-    outname_xyz = args.outname_xyz #'selection.xyz'
-    outname_selection = args.outname_selection #'lm_atoms.txt'
+    outname_xyz = 'selection.xyz'
+    outname_selection = 'lm_atoms.txt'
     lm_cutoff = args.lm_cutoff #4
 
-    id0, lm_ids = select_nn(
+    id0, r0, lm_ids = select_nn(
         project,
         target,
         structure,
@@ -311,10 +326,11 @@ if __name__=="__main__":
     lmad_steps = args.lmad_steps #500
     check_steps = args.check_steps #100
     dump_steps = args.dump_steps #10
+    active_radius = args.active_radius # 20
     transition_all = args.transition_all #False # True - transition event triggered by any atom, False - only by target atom (id0)
 
     distance_cutoff = args.distance_cutoff #0.3 #A
-    clean_space = (not args.not_clean_space) #1#True
+    clean_space = args.not_clean_space #1#True
     heat_coef = args.heat_coef #5
     elements = ' '.join(args.elements) #"Ag Ni"
 
@@ -330,9 +346,11 @@ if __name__=="__main__":
             check_steps,
             dump_steps,
             distance_cutoff,
+            active_radius,
             elements,
             clean_space,
             n_cpu,
+            r0,
             transition_all,
             id0
         )

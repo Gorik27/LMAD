@@ -22,7 +22,7 @@ shell cd ${project}
 read_data ${structure}
 
 pair_style  nep 
-pair_coeff * * /home/user/Projects/Potentials/nep89.txt ${elements_str}
+pair_coeff * * /media/user/HDD/Projects/Potentials/nep89.txt ${elements_str}
 
 variable dt equal 0.001
 timestep ${dt}
@@ -32,11 +32,18 @@ include params.txt
 variable heat_coef index 5
 
 include lm_atoms.txt # group lm_atoms id ....
-group non_lm subtract all lm_atoms
 
-compute pe all pe/atom
-compute ke all ke/atom
-compute max_ke all reduce max c_ke
+variable x0 index 0
+variable y0 index 0
+variable z0 index 0
+variable active_radius index 20
+region active_sphere sphere ${x0} ${y0} ${z0} ${active_radius}
+group active region active_sphere
+group fixed subtract all active
+
+compute pe active pe/atom
+compute ke active ke/atom
+compute max_ke active reduce max c_ke
 shell mkdir dumps
 shell mkdir dumps/lmad_${rnd_seed}
 #print "dumpfile: dumps/lmad_${rnd_seed}/dump_*.cfg"
@@ -52,15 +59,15 @@ shell mkdir thermo
 variable file index thermo/${rnd_seed}.txt
 print "##dt = ${dt}" file ${file} screen no
 print "#time; temp; pe; ke; max_ke" append ${file} screen no
-fix out all print ${thermo_step} "$(time); $(temp); $(pe); $(ke); $(c_max_ke)" append ${file} screen no
+fix out active print ${thermo_step} "$(time); $(temp); $(pe); $(ke); $(c_max_ke)" append ${file} screen no
 
-#velocity non_lm create ${T} ${rnd_seed} dist gaussian
+velocity active create ${T} ${rnd_seed} dist gaussian
 velocity lm_atoms create $(v_heat_coef*v_T_melt) ${rnd_seed} dist uniform
 #velocity lm_atoms scale $(10*v_T_melt)
 
 write_data initial.dat nocoeff
 
-fix 1 all nve
+fix 1 active nve
 
 run ${lmad_steps}
 

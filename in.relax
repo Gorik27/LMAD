@@ -20,7 +20,7 @@ shell cd ${project}
 read_data ${structure}
 
 pair_style  nep 
-pair_coeff * * /home/user/Projects/Potentials/nep89.txt ${elements_str}
+pair_coeff * * /media/user/HDD/Projects/Potentials/nep89.txt ${elements_str}
 
 timestep ${dt}
 

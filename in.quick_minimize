@@ -26,12 +26,21 @@ log logs/${rnd_seed}/log.qm_${id}
 read_data ${structure}
 
 pair_style  nep 
-pair_coeff * * /home/user/Projects/Potentials/nep89.txt ${elements_str}
+pair_coeff * * /media/user/HDD/Projects/Potentials/nep89.txt ${elements_str}
 
 thermo_style custom time pe press 
 thermo  10
 
-fix 1 all recenter INIT INIT INIT
+variable x0 index 0
+variable y0 index 0
+variable z0 index 0
+variable active_radius index 20
+region active_sphere sphere ${x0} ${y0} ${z0} ${active_radius}
+group active region active_sphere
+group fixed subtract all active
+
+fix 1 active recenter INIT INIT INIT
+fix 2 fixed setforce 0.0 0.0 0.0
 
 min_style cg
 minimize 1e-10 1e-2 1000 10000
