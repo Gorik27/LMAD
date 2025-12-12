@@ -31,15 +31,16 @@ include params.txt
 
 variable heat_coef index 5
 
-include lm_atoms.txt # group lm_atoms id ....
-
 variable x0 index 0
 variable y0 index 0
 variable z0 index 0
 variable active_radius index 20
+variable lm_radius index 4
 region active_sphere sphere ${x0} ${y0} ${z0} ${active_radius}
 group active region active_sphere
 group fixed subtract all active
+region lm_sphere sphere ${x0} ${y0} ${z0} ${lm_radius}
+group lm_atoms region lm_sphere
 
 compute pe active pe/atom
 compute ke active ke/atom

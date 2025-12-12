@@ -6,7 +6,7 @@ from subprocess import Popen, PIPE
 import logging
 from glob import glob
 import time
-from ase.io import read
+from ase.io import read, write
 import os
 from pathlib import Path
 import shutil
@@ -19,73 +19,87 @@ def numerical_sort_key(filename):
     parts = re.findall(r'\d+|\D+', filename)
     return [int(part) if part.isdigit() else part for part in parts]
 
+def insert_masses(filename, ms, symbols):
+    with open(filename, 'r') as f:
+        lines = f.readlines()
+    
+    insert_index = -1
+
+    for i, line in enumerate(lines):
+        if 'Atoms # atomic' in line:
+            insert_index = i - 1 
+            break
+    
+    if insert_index == -1:
+        raise ValueError('Incorrect file format string "Atoms # atomic" does not present!')
+
+    masses = [f"{i+1} {ms[i]} # {symbols[i]}" for i in range(len(ms))]
+    line_to_insert = "\nMasses\n\n"+"\n".join(masses)+"\n"
+    lines.insert(insert_index, line_to_insert)
+    
+    with open(filename, 'w') as f:
+        f.writelines(lines)
+
 def select_nn(
     project,
     target,
     structure,
     outname_selection,
     outname_xyz,
-    cutoff):
-    """
-    Find elements
-    """
-    elements = {}
-    num_types = 0
-    cnt = 0
+    outname_active,
+    cutoff,
+    active_radius,
+    potential_cutoff):
     structure = f'{project}/{structure}'
     outname_selection = f'{project}/{outname_selection}'
     outname_xyz = f'{project}/{outname_xyz}'
-
-    with open(structure) as f:
-        for line in f.readlines():
-            match = re.search(r'\s*(\d+)\s+atom types\s*', line)
-            if match:
-                num_types = int(match.group(1))
-            if num_types:
-                if cnt<num_types:
-                    match = re.search(r'\s*(\d+)\s+\d+\.\d*\s+#\s+(.+)\s*', line)
-                    if match:
-                        tokens = match.groups()[::-1]
-                        elements.update({tokens[0]: int(tokens[1])})
-                        cnt += 1
-                elif cnt==num_types:
-                    break
-
-    print('find elements:', elements)
+    outname_active = f'{project}/{outname_active}'
 
     """
     Find hopping atom
     """
     atoms = read(structure, format='lammps-data')
-    pts = atoms.positions
-    ids = atoms.arrays['id']
+    inds = np.arange(len(atoms))
     L = np.diag(atoms.cell)
-    mask = (atoms.arrays['type']==elements[target])
-    id0 = ids[mask][0]
-    r0 = pts[mask][0]
-
+    types = np.array(atoms.get_chemical_symbols())
+    ind0 = np.where(types==target)[0][0]
+    ids = atoms.arrays['id']
+    
     """
     Find neighbors
     """
-    @njit(cache=True)
-    def dist_to(rs, pos, L):
-        ds = np.zeros(len(rs))
-        dr = np.abs(rs-pos)
-        for xi in range(3):
-            x = dr[:, xi]
-            mask = (x>L[xi]*0.5)
-            x[mask] = L[xi]-x[mask]
-        return np.sum(dr**2, axis=1)**0.5
+    ds = atoms.get_distances(ind0, inds, mic=True)
 
-    ds = dist_to(pts, r0, L)
-
-    lm_mask = (ds<cutoff)
+    assert cutoff < (active_radius+potential_cutoff)
+    lm_mask = (ds<=cutoff)
     lm_ids = ids[lm_mask]
-    print('Neighboring atoms:', len(lm_ids))
-
+    print('LM atoms:', len(lm_ids))
     out = 'group lm_atoms id '+' '.join(map(str, lm_ids))
     with open(outname_selection, 'w') as f:
         f.write(out)
+
+    delete_mask = (ds>(active_radius+potential_cutoff))
+    del atoms[inds[delete_mask]]
+    print('Active atoms:', len(atoms))
+    write(outname_active, atoms, format='lammps-data')
+    types = np.array(atoms.get_chemical_symbols())
+    ind0 = np.where(types==target)[0][0]
+    r0 = atoms.positions[ind0]
+
+    elements = set(atoms.get_chemical_symbols())
+    types_num = atoms.arrays['type']
+    ms_all = atoms.get_masses()
+    ms = [0]*len(elements)
+    symbols = ['']*len(elements)
+    for e in elements:
+        ind = np.where(types==e)[0][0]
+        i = types_num[ind]-1
+        ms[i] = ms_all[ind]
+        symbols[i] = types[ind] 
+
+    elements = " ".join(symbols)
+
+    insert_masses(outname_active, ms, symbols)
 
     pipeline = import_file(structure)
     data = pipeline.compute()
@@ -93,25 +107,24 @@ def select_nn(
     pipeline_out = Pipeline(source = StaticSource(data=data))
     export_file(pipeline_out, outname_xyz, "xyz", columns=['Position', 'Particle Type', 'Particle Identifier', 'Selection']) 
     
-    return id0, r0, lm_ids 
+    return ind0, r0, elements
 
 def check_transition(
     project,
     datfiles,
-    id0,
+    ind0,
     cutoff,
     transition_all,
     rnd_seed,
     clean_space):
-    def get_rs_id(file):
+    def get_rs(file):
         atoms = read(f'{project}/{file}', format='lammps-data')
-        return atoms.positions, atoms.arrays['id']
+        return atoms.positions
 
     atoms = read(f'{project}/{datfiles[0]}', format='lammps-data')
     r0 = atoms.positions
-    ids0 = atoms.arrays['id']
     L = np.diag(atoms.cell)
-    rs_ids = [get_rs_id(datfile) for datfile in datfiles[1:]]
+    rs = [get_rs(datfile) for datfile in datfiles[1:]]
 
 
     def dist_point(r0, r, L):
@@ -132,17 +145,15 @@ def check_transition(
 
     transition_inds = [0]
     transition_flag = False
-    for i in range(len(rs_ids)):
+    for i in range(len(rs)):
         if transition_all:
-            ds = dist_arrays(r0, rs_ids[i][0], L)
+            ds = dist_arrays(r0, rs[i], L)
         else:
-            rs, ids = rs_ids[i]
-            ind0 = np.where(ids==id0)[0][0]
-            ds = dist_point(r0[ind0], rs[ind0], L)
+            ds = dist_point(r0[ind0], rs[i][ind0], L)
         if np.any(ds>cutoff):
             transition_inds.append(i+1)
             transition_flag = True
-            r0 = rs_ids[i][0]
+            r0 = rs[i]
 
     if transition_flag:
         print(f'Find transitions: {transition_inds}')
@@ -172,6 +183,7 @@ def check_transition(
 def LMAD(
     lmp,
     project,
+    structure,
     rnd_seed, 
     heat_coef,
     lmad_steps,
@@ -184,17 +196,20 @@ def LMAD(
     n_cpu,
     r0, 
     transition_all,
-    id0=None):
+    ind0=None):
 
     chech_each = int(lmad_steps//chech_steps)
     print(f'random seed: {rnd_seed}')
     """
     STEP 1: LOCAL MELTING
     """
+    #print('#1 LM')
     routine = 'in.lmad'
     task = (f'{lmp} -in  {routine} \
     -var rnd_seed {rnd_seed} \
     -var project {project} \
+    -var structure {structure} \
+    -var lm_radius {lm_cutoff} \
     -var lmad_steps {lmad_steps} \
     -var thermo_steps {dump_steps} \
     -var heat_coef {heat_coef} \
@@ -226,6 +241,7 @@ def LMAD(
     STEP 2: SEARCH FOR TRANSITIONS
     2A: MINIMIZATION
     """
+    #print('#2 Unfold')
     task = f'atomsk --unfold {project}/{dumpfile} -remove-atoms 0 lmp -overwrite'
     with Popen(task.split(), stdout=PIPE, stdin=PIPE, bufsize=1, universal_newlines=True) as p:
         for line in p.stdout:
@@ -236,6 +252,7 @@ def LMAD(
     structures = files[::chech_each]
     #print(structures)
 
+    #print('#3 QM')
     routine = 'in.quick_minimize'
     datfiles = []
     for id, structure in enumerate(structures):
@@ -268,10 +285,11 @@ def LMAD(
     STEP 2: SEARCH FOR TRANSITIONS
     2B: COMPARIZON
     """           
+    #print('#4 Check transitions')
     check_transition(
     project,
     datfiles,
-    id0,
+    ind0,
     cutoff,
     transition_all,
     rnd_seed,
@@ -293,6 +311,8 @@ if __name__=="__main__":
                         help='lammps executable')
     parser.add_argument("-N", '--N_steps', type=int, default=100,
                         help='number of LMAD steps')
+    parser.add_argument('--rnd', type=int, nargs='+', default=[],
+                        help='random seeds to calculate')
     parser.add_argument('--lmad_steps', type=int, default=500,
                         help='number of MD annealing steps in LMAD run')
     parser.add_argument('--check_steps', type=int, default=100,
@@ -305,12 +325,12 @@ if __name__=="__main__":
                         help='distance cutoff above which transition is detected [Angstroms]')
     parser.add_argument("-r", '--active_radius', type=float, default=20,
                         help='radius of sphere for MD simulation [Angstroms]')
+    parser.add_argument('--potential_cutoff', type=float, default=6,
+                        help='radius of sphere for MD simulation [Angstroms]')
     parser.add_argument('--not_clean_space', action='store_false', default=True,
                         help='turn off removing dumps if transition did not occur')
     parser.add_argument("-hc", '--heat_coef', type=float, default=5.0,
                         help='heating coefficient (temperature = melting_temperature*melting_coef)')
-    parser.add_argument('-e', '--elements', type=str, nargs='+', required=True,
-                        help='chemical elements separated by spaces (to put in lammps potential setup)')
     args = parser.parse_args()
     
     project = args.name #'s3_210_1ni'
@@ -318,17 +338,23 @@ if __name__=="__main__":
     structure = args.structure #'relaxed.dat'
     outname_xyz = 'selection.xyz'
     outname_selection = 'lm_atoms.txt'
+    outname_active = 'active.dat'
     lm_cutoff = args.lm_cutoff #4
+    active_radius = args.active_radius # 20
+    potential_cutoff = args.potential_cutoff
 
-    id0, r0, lm_ids = select_nn(
+    id0, r0, elements = select_nn(
         project,
         target,
         structure,
         outname_selection,
         outname_xyz,
-        lm_cutoff
+        outname_active,
+        lm_cutoff,
+        active_radius,
+        potential_cutoff*1.1
     )
-
+    print('id0: ', id0)
     n_cpu = args.np #8S
     lmp_bin = args.lmp #'lmp_ompi'
     if n_cpu > 1:
@@ -343,20 +369,23 @@ if __name__=="__main__":
     lmad_steps = args.lmad_steps #500
     check_steps = args.check_steps #100
     dump_steps = args.dump_steps #10
-    active_radius = args.active_radius # 20
     transition_all = args.transition_all #False # True - transition event triggered by any atom, False - only by target atom (id0)
 
     distance_cutoff = args.distance_cutoff #0.3 #A
     clean_space = args.not_clean_space #1#True
     heat_coef = args.heat_coef #5
-    elements = ' '.join(args.elements) #"Ag Ni"
 
-    rng_list = range(1, N_steps+1)
-    for rnd_seed in rng_list:
-        print(f'STEP: {rnd_seed}/{N_steps}')
+    if len(args.rnd)==0:
+        rng_list = range(1, N_steps+1)
+    else:
+
+        rng_list = args.rnd
+    for i, rnd_seed in enumerate(rng_list):
+        print(f'STEP: {i+1}/{N_steps}')
         LMAD(
             lmp,
             project,
+            outname_active,
             rnd_seed, 
             heat_coef,
             lmad_steps,
