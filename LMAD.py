@@ -180,6 +180,52 @@ def check_transition(
             except OSError as e:
                 print(f"Error removing: {path} : {e.strerror}")
 
+def md(
+    rnd_seed,
+    project,
+    structure,
+    lm_cutoff,
+    lmad_steps,
+    dump_steps,
+    heat_coef,
+    elements,
+    r0,
+    active_radius
+):
+    routine = 'in.lmad'
+    task = (f'{lmp} -in  {routine} \
+    -var rnd_seed {rnd_seed} \
+    -var project {project} \
+    -var structure {structure} \
+    -var lm_radius {lm_cutoff} \
+    -var lmad_steps {lmad_steps} \
+    -var thermo_steps {dump_steps} \
+    -var heat_coef {heat_coef} \
+    -var elements {elements} \
+    -var x0 {r0[0]} \
+    -var y0 {r0[1]} \
+    -var z0 {r0[2]} \
+    -var active_radius {active_radius}')
+
+    finished = False
+    dumpfile = ''
+    with Popen(task.split(), stdout=PIPE, bufsize=1, universal_newlines=True) as p:
+        time.sleep(0.1)
+        #print('\n')
+        #logging.info('\n')
+        for line in p.stdout:
+            if 'ERROR' in line:
+                raise ValueError(f'ERROR in LAMMPS: {line}')
+            if 'All done!' in line:
+                finished = True
+            elif "dumpfile" in line:
+                dumpfile = (line.replace('dumpfile: ', '')).replace('\n', '')
+
+    if not finished:
+        raise ValueError('ERROR!!!\n Something went wrong during LMAD')
+
+    return dumpfile
+
 def LMAD(
     lmp,
     project,
@@ -204,38 +250,16 @@ def LMAD(
     STEP 1: LOCAL MELTING
     """
     #print('#1 LM')
-    routine = 'in.lmad'
-    task = (f'{lmp} -in  {routine} \
-    -var rnd_seed {rnd_seed} \
-    -var project {project} \
-    -var structure {structure} \
-    -var lm_radius {lm_cutoff} \
-    -var lmad_steps {lmad_steps} \
-    -var thermo_steps {dump_steps} \
-    -var heat_coef {heat_coef} \
-    -var elements {elements} \
-    -var thermo_steps {dump_steps} \
-    -var x0 {r0[0]} \
-    -var y0 {r0[1]} \
-    -var z0 {r0[2]} \
-    -var active_radius {active_radius}')
-
-    finished = False
-    dumpfile = ''
-    with Popen(task.split(), stdout=PIPE, bufsize=1, universal_newlines=True) as p:
-        time.sleep(0.1)
-        #print('\n')
-        #logging.info('\n')
-        for line in p.stdout:
-            if 'ERROR' in line:
-                raise ValueError(f'ERROR in LAMMPS: {line}')
-            if 'All done!' in line:
-                finished = True
-            elif "dumpfile" in line:
-                dumpfile = (line.replace('dumpfile: ', '')).replace('\n', '')
-
-    if not finished:
-        raise ValueError('ERROR!!!\n Something went wrong during LMAD')
+    dumpfile = md(rnd_seed,
+                project,
+                structure,
+                lm_cutoff,
+                lmad_steps,
+                dump_steps,
+                heat_coef,
+                elements,
+                r0,
+                active_radius)
 
     """
     STEP 2: SEARCH FOR TRANSITIONS
