@@ -58,7 +58,7 @@ def select_nn(
     """
     Find hopping atom
     """
-    atoms = read(structure, format='lammps-data')
+    atoms = read(structure, format='lammps-data', sort_by_id=False, units="metal")
     inds = np.arange(len(atoms))
     L = np.diag(atoms.cell)
     types = np.array(atoms.get_chemical_symbols())
@@ -73,15 +73,17 @@ def select_nn(
     assert cutoff < (active_radius+potential_cutoff)
     lm_mask = (ds<=cutoff)
     lm_ids = ids[lm_mask]
-    print('LM atoms:', len(lm_ids))
+    N_LMatoms = len(lm_ids)
+    print('LM atoms:', N_LMatoms)
     out = 'group lm_atoms id '+' '.join(map(str, lm_ids))
     with open(outname_selection, 'w') as f:
         f.write(out)
 
     delete_mask = (ds>(active_radius+potential_cutoff))
     del atoms[inds[delete_mask]]
-    print('Active atoms:', len(atoms))
-    write(outname_active, atoms, format='lammps-data')
+    N_active = len(atoms)
+    print('Active atoms:', N_active)
+
     types = np.array(atoms.get_chemical_symbols())
     ind0 = np.where(types==target)[0][0]
     r0 = atoms.positions[ind0]
@@ -99,7 +101,7 @@ def select_nn(
 
     elements = " ".join(symbols)
 
-    insert_masses(outname_active, ms, symbols)
+    write(outname_active, atoms, format='lammps-data', velocities=True, masses=True, units="metal", specorder=symbols)
 
     pipeline = import_file(structure)
     data = pipeline.compute()
@@ -107,7 +109,7 @@ def select_nn(
     pipeline_out = Pipeline(source = StaticSource(data=data))
     export_file(pipeline_out, outname_xyz, "xyz", columns=['Position', 'Particle Type', 'Particle Identifier', 'Selection']) 
     
-    return ind0, r0, elements
+    return ind0, r0, elements, N_LMatoms
 
 def check_transition(
     project,
@@ -190,16 +192,18 @@ def md(
     heat_coef,
     elements,
     r0,
-    active_radius
+    active_radius,
+    time_step
 ):
     routine = 'in.lmad'
     task = (f'{lmp} -in  {routine} \
     -var rnd_seed {rnd_seed} \
+    -var dt_inp {time_step} \
     -var project {project} \
     -var structure {structure} \
     -var lm_radius {lm_cutoff} \
     -var lmad_steps {lmad_steps} \
-    -var thermo_steps {dump_steps} \
+    -var thermo_step {dump_steps} \
     -var heat_coef {heat_coef} \
     -var elements {elements} \
     -var x0 {r0[0]} \
@@ -242,9 +246,10 @@ def LMAD(
     n_cpu,
     r0, 
     transition_all,
-    ind0=None):
+    ind0=None,
+    time_step=0.001):
 
-    chech_each = int(lmad_steps//chech_steps)
+    chech_each = int(chech_steps//dump_steps)
     print(f'random seed: {rnd_seed}')
     """
     STEP 1: LOCAL MELTING
@@ -259,14 +264,20 @@ def LMAD(
                 heat_coef,
                 elements,
                 r0,
-                active_radius)
+                active_radius,
+                time_step)
 
     """
     STEP 2: SEARCH FOR TRANSITIONS
     2A: MINIMIZATION
     """
     #print('#2 Unfold')
-    task = f'atomsk --unfold {project}/{dumpfile} -remove-atoms 0 lmp -overwrite'
+    #task = f'atomsk --unfold {project}/{dumpfile} -remove-atoms 0 lmp -overwrite'
+    type_args = ''
+    el_list = [e for e in elements.split(' ') if e!='']
+    for i, e in enumerate(el_list):
+        type_args += f'-substitute {i+1} {e} '
+    task = f'atomsk --unfold {project}/{dumpfile} {type_args} lmp -overwrite'
     with Popen(task.split(), stdout=PIPE, stdin=PIPE, bufsize=1, universal_newlines=True) as p:
         for line in p.stdout:
             if 'ERROR' in line:
@@ -355,6 +366,8 @@ if __name__=="__main__":
                         help='turn off removing dumps if transition did not occur')
     parser.add_argument("-hc", '--heat_coef', type=float, default=5.0,
                         help='heating coefficient (temperature = melting_temperature*melting_coef)')
+    parser.add_argument("-dt", '--time_step', type=float, default=0.001,
+                        help='timestep in ps [default: 0.001ps = 1fs]')
     args = parser.parse_args()
     
     project = args.name #'s3_210_1ni'
@@ -367,7 +380,7 @@ if __name__=="__main__":
     active_radius = args.active_radius # 20
     potential_cutoff = args.potential_cutoff
 
-    id0, r0, elements = select_nn(
+    ind0, r0, elements, N_LMatoms = select_nn(
         project,
         target,
         structure,
@@ -378,7 +391,8 @@ if __name__=="__main__":
         active_radius,
         potential_cutoff*1.1
     )
-    print('id0: ', id0)
+
+    print('ind0: ', ind0)
     n_cpu = args.np #8S
     lmp_bin = args.lmp #'lmp_ompi'
     if n_cpu > 1:
@@ -398,12 +412,28 @@ if __name__=="__main__":
     distance_cutoff = args.distance_cutoff #0.3 #A
     clean_space = args.not_clean_space #1#True
     heat_coef = args.heat_coef #5
+    time_step = args.time_step #0.001
+
+    with open(f'{project}/params.txt') as f:
+        params = {'T': -1, 'T_melt': -1}
+        for line in f.readlines():
+            match = re.search(r"variable\s+(?P<name>\w+)\s+equal\s+(?P<value>\d*\.?\d+)", line)
+            if match:
+                params[match.group("name")] = float(match.group("value"))
+    print("parameters:", params)
+    if -1 in list(params.values()):
+        raise ValueError("params.txt incorrect!")
+    kB = 8.617e-5 # eV
+    T_lm = params["T_melt"]*heat_coef
+    delta_E = 3*kB*(T_lm-params["T"])*N_LMatoms/2
+    print(f'LM Temperature: {round(T_lm, 0)}K')
+    print(f'Energy transferred to the system: {round(delta_E,1)} eV')
 
     if len(args.rnd)==0:
         rng_list = range(1, N_steps+1)
     else:
-
         rng_list = args.rnd
+        N_steps = len(rng_list)
     for i, rnd_seed in enumerate(rng_list):
         print(f'STEP: {i+1}/{N_steps}')
         LMAD(
@@ -422,5 +452,6 @@ if __name__=="__main__":
             n_cpu,
             r0,
             transition_all,
-            id0
+            ind0,
+            time_step
         )

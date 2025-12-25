@@ -14,17 +14,21 @@ variable lmad_steps index 1000
 variable elements index "N Ag"
 variable elements_str string ""
 label loop_elem
-  variable elements_str string "${elements_str}${elements} "
-  next elements
-  jump SELF loop_elem
+variable elements_str string "${elements_str}${elements} "
+next elements
+jump SELF loop_elem
 
 shell cd ${project}
+shell mkdir logs
+shell mkdir logs/${rnd_seed}
+log logs/${rnd_seed}/log.lmad
 read_data ${structure}
 
 pair_style  nep 
 pair_coeff * * /media/user/HDD/Projects/Potentials/nep89.txt ${elements_str}
 
-variable dt equal 0.001
+variable dt_inp index 0.001
+variable dt equal ${dt_inp}
 timestep ${dt}
 
 include params.txt
@@ -55,16 +59,15 @@ dump 2 all atom ${thermo_step} dumps/lmad_${rnd_seed}/dump
 #dump_modify 2 element N Ag
 
 thermo_style custom time temp pe ke c_max_ke 
-thermo 100
+thermo ${thermo_step}
 shell mkdir thermo
 variable file index thermo/${rnd_seed}.txt
 print "##dt = ${dt}" file ${file} screen no
 print "#time; temp; pe; ke; max_ke" append ${file} screen no
 fix out active print ${thermo_step} "$(time); $(temp); $(pe); $(ke); $(c_max_ke)" append ${file} screen no
 
-velocity active create ${T} ${rnd_seed} dist gaussian
+#velocity active create ${T} ${rnd_seed} dist gaussian
 velocity lm_atoms create $(v_heat_coef*v_T_melt) ${rnd_seed} dist uniform
-#velocity lm_atoms scale $(10*v_T_melt)
 
 write_data initial.dat nocoeff
 
