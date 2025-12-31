@@ -8,7 +8,9 @@ neighbor        2.0 bin
 
 variable project index cell
 variable structure index relaxed.dat
+variable dat_path index qm
 variable id index 0
+variable target_id index 0
 variable rnd_seed index 0
 variable thermo_step index 10
 variable elements index "N Ag"
@@ -20,8 +22,9 @@ label loop_elem
 
 shell cd ${project}
 shell mkdir logs
-shell mkdir logs/${rnd_seed}
-log logs/${rnd_seed}/log.qm_${id}
+shell mkdir logs/${target_id}
+shell mkdir logs/${target_id}/${rnd_seed}
+log logs/${target_id}/${rnd_seed}/log.${dat_path}_${id}
 
 read_data ${structure}
 
@@ -44,8 +47,9 @@ fix 2 fixed setforce 0.0 0.0 0.0
 
 min_style cg
 minimize 1e-10 1e-2 1000 10000
-shell mkdir qm
-shell mkdir qm/${rnd_seed}
-write_data qm/${rnd_seed}/${id}.dat nocoeff
-print "datfile: qm/${rnd_seed}/${id}.dat"
+shell mkdir ${dat_path}
+shell mkdir ${dat_path}/${target_id}
+shell mkdir ${dat_path}/${target_id}/${rnd_seed}
+write_data ${dat_path}/${target_id}/${rnd_seed}/${id}.dat nocoeff
+print "datfile: ${dat_path}/${target_id}/${rnd_seed}/${id}.dat"
 print "All done!"

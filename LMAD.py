@@ -12,37 +12,20 @@ from pathlib import Path
 import shutil
 import argparse
 from numba import njit
+from utils import numerical_sort_key
 
+def find_targets(project, structure, target):
+    structure = f'{project}/{structure}'
+    atoms = read(structure, format='lammps-data', sort_by_id=False, units="metal")
+    inds = np.arange(len(atoms))
+    types = np.array(atoms.get_chemical_symbols())
+    ind_targets = np.where(types==target)[0]
+    return ind_targets
 
-def numerical_sort_key(filename):
-    # Extract numerical parts from the filename for sorting
-    parts = re.findall(r'\d+|\D+', filename)
-    return [int(part) if part.isdigit() else part for part in parts]
-
-def insert_masses(filename, ms, symbols):
-    with open(filename, 'r') as f:
-        lines = f.readlines()
-    
-    insert_index = -1
-
-    for i, line in enumerate(lines):
-        if 'Atoms # atomic' in line:
-            insert_index = i - 1 
-            break
-    
-    if insert_index == -1:
-        raise ValueError('Incorrect file format string "Atoms # atomic" does not present!')
-
-    masses = [f"{i+1} {ms[i]} # {symbols[i]}" for i in range(len(ms))]
-    line_to_insert = "\nMasses\n\n"+"\n".join(masses)+"\n"
-    lines.insert(insert_index, line_to_insert)
-    
-    with open(filename, 'w') as f:
-        f.writelines(lines)
 
 def select_nn(
     project,
-    target,
+    ind0,
     structure,
     outname_selection,
     outname_xyz,
@@ -51,9 +34,10 @@ def select_nn(
     active_radius,
     potential_cutoff):
     structure = f'{project}/{structure}'
-    outname_selection = f'{project}/{outname_selection}'
-    outname_xyz = f'{project}/{outname_xyz}'
-    outname_active = f'{project}/{outname_active}'
+    Path(f'{project}/{ind0}').mkdir(parents=True, exist_ok=True)
+    outname_selection = f'{project}/{ind0}/{outname_selection}'
+    outname_xyz = f'{project}/{ind0}/{outname_xyz}'
+    outname_active = f'{project}/{ind0}/{outname_active}'
 
     """
     Find hopping atom
@@ -61,9 +45,9 @@ def select_nn(
     atoms = read(structure, format='lammps-data', sort_by_id=False, units="metal")
     inds = np.arange(len(atoms))
     L = np.diag(atoms.cell)
-    types = np.array(atoms.get_chemical_symbols())
-    ind0 = np.where(types==target)[0][0]
     ids = atoms.arrays['id']
+    r0 = atoms.positions[ind0]
+    id0 = ids[ind0]
     
     """
     Find neighbors
@@ -84,19 +68,16 @@ def select_nn(
     N_active = len(atoms)
     print('Active atoms:', N_active)
 
-    types = np.array(atoms.get_chemical_symbols())
-    ind0 = np.where(types==target)[0][0]
-    r0 = atoms.positions[ind0]
+    ids = atoms.arrays['id']
+    ind0 = np.where(ids==id0)[0][0] # reassign ind0 in active atoms because we delete some atoms
 
+    types = np.array(atoms.get_chemical_symbols())
     elements = set(atoms.get_chemical_symbols())
     types_num = atoms.arrays['type']
-    ms_all = atoms.get_masses()
-    ms = [0]*len(elements)
     symbols = ['']*len(elements)
     for e in elements:
         ind = np.where(types==e)[0][0]
         i = types_num[ind]-1
-        ms[i] = ms_all[ind]
         symbols[i] = types[ind] 
 
     elements = " ".join(symbols)
@@ -159,7 +140,7 @@ def check_transition(
 
     if transition_flag:
         print(f'Find transitions: {transition_inds}')
-        neb_path = Path(f'{project}/neb/{str(int(rnd_seed))}')
+        neb_path = Path(f'{project}/neb/{ind0}/{str(int(rnd_seed))}')
         neb_path.mkdir(parents=True, exist_ok=True)
         for i, ind in enumerate(transition_inds):
             src = f'{project}/{datfiles[ind]}'
@@ -171,13 +152,13 @@ def check_transition(
         if clean_space:
             #remove quick_minimization files
             try:
-                path = f'{project}/qm/{str(int(rnd_seed))}'
+                path = f'{project}/qm/{ind0}/{str(int(rnd_seed))}'
                 shutil.rmtree(path)
             except OSError as e:
                 print(f"Error removing: {path} : {e.strerror}")
             #remove dump files
             try:
-                path = f'{project}/dumps/lmad_{str(int(rnd_seed))}'
+                path = f'{project}/dumps/{ind0}/lmad_{str(int(rnd_seed))}'
                 shutil.rmtree(path)
             except OSError as e:
                 print(f"Error removing: {path} : {e.strerror}")
@@ -198,9 +179,10 @@ def md(
     routine = 'in.lmad'
     task = (f'{lmp} -in  {routine} \
     -var rnd_seed {rnd_seed} \
+    -var target_id {ind0} \
     -var dt_inp {time_step} \
     -var project {project} \
-    -var structure {structure} \
+    -var structure {ind0}/{structure} \
     -var lm_radius {lm_cutoff} \
     -var lmad_steps {lmad_steps} \
     -var thermo_step {dump_steps} \
@@ -229,6 +211,46 @@ def md(
         raise ValueError('ERROR!!!\n Something went wrong during LMAD')
 
     return dumpfile
+
+def qm(
+    project, 
+    structure,
+    lmp,
+    rnd_seed,
+    id,
+    elements,
+    r0,
+    active_radius,
+    qm_path='qm'
+    ):
+    routine = 'in.quick_minimize'
+    structure = structure.replace(project+'/', '')
+    task = (f'{lmp} -in  {routine} -var project {project} \
+    -var structure {structure} \
+    -var rnd_seed {str(int(rnd_seed))} \
+    -var id {id} \
+    -var target_id {ind0} \
+    -var elements {elements} \
+    -var x0 {r0[0]} \
+    -var y0 {r0[1]} \
+    -var z0 {r0[2]} \
+    -var active_radius {active_radius}\
+    -var dat_path {qm_path}')
+    with Popen(task.split(), stdout=PIPE, bufsize=1, universal_newlines=True) as p:
+        time.sleep(0.1)
+        #print('\n')
+        #logging.info('\n')
+        for line in p.stdout:
+            if 'ERROR' in line:
+                raise ValueError(f'ERROR in LAMMPS: {line}')
+            if 'All done!' in line:
+                finished = True
+            elif "datfile" in line:
+                datfile = (line.replace('datfile: ', '')).replace('\n', '')
+    if not finished:
+        raise ValueError('ERROR!!!\n Something went wrong during minimization')
+
+    return datfile
 
 def LMAD(
     lmp,
@@ -288,47 +310,29 @@ def LMAD(
     #print(structures)
 
     #print('#3 QM')
-    routine = 'in.quick_minimize'
     datfiles = []
     for id, structure in enumerate(structures):
-        #print(1+id, '/', len(structures))
-        structure = structure.replace(project+'/', '')
-        task = (f'{lmp} -in  {routine} -var project {project} \
-        -var structure {structure} \
-        -var rnd_seed {str(int(rnd_seed))} \
-        -var id {id} \
-        -var elements {elements} \
-        -var x0 {r0[0]} \
-        -var y0 {r0[1]} \
-        -var z0 {r0[2]} \
-        -var active_radius {active_radius}')
-        with Popen(task.split(), stdout=PIPE, bufsize=1, universal_newlines=True) as p:
-            time.sleep(0.1)
-            #print('\n')
-            #logging.info('\n')
-            for line in p.stdout:
-                if 'ERROR' in line:
-                    raise ValueError(f'ERROR in LAMMPS: {line}')
-                if 'All done!' in line:
-                    finished = True
-                elif "datfile" in line:
-                    datfile = (line.replace('datfile: ', '')).replace('\n', '')
-        if not finished:
-            raise ValueError('ERROR!!!\n Something went wrong during minimization')
+        datfile = qm(project, 
+                    structure,
+                    lmp,
+                    rnd_seed,
+                    id,
+                    elements,
+                    r0,
+                    active_radius)
         datfiles.append(datfile)
     """
     STEP 2: SEARCH FOR TRANSITIONS
     2B: COMPARIZON
     """           
     #print('#4 Check transitions')
-    check_transition(
-    project,
-    datfiles,
-    ind0,
-    cutoff,
-    transition_all,
-    rnd_seed,
-    clean_space)
+    check_transition(project,
+                    datfiles,
+                    ind0,
+                    cutoff,
+                    transition_all,
+                    rnd_seed,
+                    clean_space)
 
 
 if __name__=="__main__":
@@ -380,78 +384,85 @@ if __name__=="__main__":
     active_radius = args.active_radius # 20
     potential_cutoff = args.potential_cutoff
 
-    ind0, r0, elements, N_LMatoms = select_nn(
-        project,
-        target,
-        structure,
-        outname_selection,
-        outname_xyz,
-        outname_active,
-        lm_cutoff,
-        active_radius,
-        potential_cutoff*1.1
-    )
+    ind_targets = find_targets(project, structure, target)
+    N_targets = len(ind_targets)
 
-    print('ind0: ', ind0)
-    n_cpu = args.np #8S
-    lmp_bin = args.lmp #'lmp_ompi'
-    if n_cpu > 1:
-        lmp = f'mpiexec --np {n_cpu} {lmp_bin}'
-    elif n_cpu == 1:
-        lmp = lmp_bin
-    else:
-        raise ValueError(f'number of cpus must be positive integer, not {n_cpu}!!!')
-
-    N_steps = args.N_steps #100
-
-    lmad_steps = args.lmad_steps #500
-    check_steps = args.check_steps #100
-    dump_steps = args.dump_steps #10
-    transition_all = args.transition_all #False # True - transition event triggered by any atom, False - only by target atom (id0)
-
-    distance_cutoff = args.distance_cutoff #0.3 #A
-    clean_space = args.not_clean_space #1#True
-    heat_coef = args.heat_coef #5
-    time_step = args.time_step #0.001
-
-    with open(f'{project}/params.txt') as f:
-        params = {'T': -1, 'T_melt': -1}
-        for line in f.readlines():
-            match = re.search(r"variable\s+(?P<name>\w+)\s+equal\s+(?P<value>\d*\.?\d+)", line)
-            if match:
-                params[match.group("name")] = float(match.group("value"))
-    print("parameters:", params)
-    if -1 in list(params.values()):
-        raise ValueError("params.txt incorrect!")
-    kB = 8.617e-5 # eV
-    T_lm = params["T_melt"]*heat_coef
-    delta_E = 3*kB*(T_lm-params["T"])*N_LMatoms/2
-    print(f'LM Temperature: {round(T_lm, 0)}K')
-    print(f'Energy transferred to the system: {round(delta_E,1)} eV')
-
-    if len(args.rnd)==0:
-        rng_list = range(1, N_steps+1)
-    else:
-        rng_list = args.rnd
-        N_steps = len(rng_list)
-    for i, rnd_seed in enumerate(rng_list):
-        print(f'STEP: {i+1}/{N_steps}')
-        LMAD(
-            lmp,
+    for i, ind in enumerate(ind_targets): 
+        print(f'TARGET: {i+1}/{N_targets}')
+        ind0, r0, elements, N_LMatoms = select_nn(
             project,
+            ind,
+            structure,
+            outname_selection,
+            outname_xyz,
             outname_active,
-            rnd_seed, 
-            heat_coef,
-            lmad_steps,
-            check_steps,
-            dump_steps,
-            distance_cutoff,
+            lm_cutoff,
             active_radius,
-            elements,
-            clean_space,
-            n_cpu,
-            r0,
-            transition_all,
-            ind0,
-            time_step
+            potential_cutoff*1.1
         )
+
+        print('ind0: ', ind0)
+        print('r0: ', r0)
+        np.savetxt(f'{project}/{ind0}/select.txt', [ind0, r0[0], r0[1], r0[2]])
+        n_cpu = args.np #8S
+        lmp_bin = args.lmp #'lmp_ompi'
+        if n_cpu > 1:
+            lmp = f'mpiexec --np {n_cpu} {lmp_bin}'
+        elif n_cpu == 1:
+            lmp = lmp_bin
+        else:
+            raise ValueError(f'number of cpus must be positive integer, not {n_cpu}!!!')
+
+        N_steps = args.N_steps #100
+
+        lmad_steps = args.lmad_steps #500
+        check_steps = args.check_steps #100
+        dump_steps = args.dump_steps #10
+        transition_all = args.transition_all #False # True - transition event triggered by any atom, False - only by target atom (id0)
+
+        distance_cutoff = args.distance_cutoff #0.3 #A
+        clean_space = args.not_clean_space #1#True
+        heat_coef = args.heat_coef #5
+        time_step = args.time_step #0.001
+
+        with open(f'{project}/params.txt') as f:
+            params = {'T': -1, 'T_melt': -1}
+            for line in f.readlines():
+                match = re.search(r"variable\s+(?P<name>\w+)\s+equal\s+(?P<value>\d*\.?\d+)", line)
+                if match:
+                    params[match.group("name")] = float(match.group("value"))
+        print("parameters:", params)
+        if -1 in list(params.values()):
+            raise ValueError("params.txt incorrect!")
+        kB = 8.617e-5 # eV
+        T_lm = params["T_melt"]*heat_coef
+        delta_E = 3*kB*(T_lm-params["T"])*N_LMatoms/2
+        print(f'LM Temperature: {round(T_lm, 0)}K')
+        print(f'Energy transferred to the system: {round(delta_E,1)} eV')
+
+        if len(args.rnd)==0:
+            rng_list = range(1, N_steps+1)
+        else:
+            rng_list = args.rnd
+            N_steps = len(rng_list)
+        for j, rnd_seed in enumerate(rng_list):
+            print(f'STEP: {j+1}/{N_steps}')
+            LMAD(
+                lmp,
+                project,
+                outname_active,
+                rnd_seed, 
+                heat_coef,
+                lmad_steps,
+                check_steps,
+                dump_steps,
+                distance_cutoff,
+                active_radius,
+                elements,
+                clean_space,
+                n_cpu,
+                r0,
+                transition_all,
+                ind0,
+                time_step
+            )
